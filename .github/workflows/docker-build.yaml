@@ -3,7 +3,7 @@ name: Build and Push Docker Hub Images
 on:
   push:
     branches:
-      - main
+      - master
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -80,7 +80,7 @@ jobs:
             echo "version=${RAW_VERSION#v}" >> $GITHUB_OUTPUT
           else
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
-            echo "version=main-${SHORT_SHA}" >> $GITHUB_OUTPUT
+            echo "version=${GITHUB_REF_NAME}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           fi
 
       - name: Set up Docker Buildx
@@ -124,7 +124,7 @@ jobs:
             echo "version=${RAW_VERSION#v}" >> "$GITHUB_OUTPUT"
           else
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
-            echo "version=main-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_REF_NAME}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Log in to GitHub Container Registry
