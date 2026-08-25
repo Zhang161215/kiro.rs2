@@ -3,7 +3,7 @@ name: Build and Push Docker Hub Images
 on:
   push:
     branches:
-      - master
+      - main
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   pre-check:
@@ -51,13 +52,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 生产服务器是 x86_64，只构建 amd64。私有仓库 Actions 计入账号免费额度，
+        # 这项目要全量编译 Rust + 从源码编译 OpenSSL，去掉 arm64 可省一半时长。
+        # 将来需要 ARM 时把下面 arm64 那两行加回来即可。
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
             arch: amd64
-          - platform: linux/arm64
-            runner: ubuntu-22.04-arm
-            arch: arm64
 
     steps:
       - name: Checkout
@@ -66,11 +67,10 @@ jobs:
       - name: Resolve Docker Hub repo
         id: repo
         env:
-          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          NAMESPACE="${DOCKERHUB_NAMESPACE:-$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')}"
-          echo "image=${NAMESPACE}/kiro-rs" >> "$GITHUB_OUTPUT"
+          OWNER=$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/${OWNER}/kiro-rs" >> "$GITHUB_OUTPUT"
 
       - name: Determine version
         id: version
@@ -78,22 +78,20 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             RAW_VERSION="${{ github.event.inputs.version }}"
             echo "version=${RAW_VERSION#v}" >> $GITHUB_OUTPUT
-            echo "is_beta=false" >> $GITHUB_OUTPUT
           else
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
-            echo "version=beta-${SHORT_SHA}" >> $GITHUB_OUTPUT
-            echo "is_beta=true" >> $GITHUB_OUTPUT
+            echo "version=main-${SHORT_SHA}" >> $GITHUB_OUTPUT
           fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -116,50 +114,43 @@ jobs:
       - name: Resolve image and version
         id: meta
         env:
-          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          NAMESPACE="${DOCKERHUB_NAMESPACE:-$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')}"
-          echo "image=${NAMESPACE}/kiro-rs" >> "$GITHUB_OUTPUT"
+          OWNER=$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/${OWNER}/kiro-rs" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             RAW_VERSION="${{ github.event.inputs.version }}"
             echo "version=${RAW_VERSION#v}" >> "$GITHUB_OUTPUT"
-            echo "is_beta=false" >> "$GITHUB_OUTPUT"
           else
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
-            echo "version=beta-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-            echo "is_beta=true" >> "$GITHUB_OUTPUT"
+            echo "version=main-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push multi-arch manifest
         env:
           IMAGE: ${{ steps.meta.outputs.image }}
           VERSION: ${{ steps.meta.outputs.version }}
-          IS_BETA: ${{ steps.meta.outputs.is_beta }}
         run: |
           set -euo pipefail
 
+          # 单架构（amd64）：manifest 只引一个平台。恢复 arm64 时在每个
+          # manifest create 后面补回 "${IMAGE}:${VERSION}-arm64"。
           docker manifest create "${IMAGE}:${VERSION}" \
-            "${IMAGE}:${VERSION}-amd64" \
-            "${IMAGE}:${VERSION}-arm64"
+            "${IMAGE}:${VERSION}-amd64"
           docker manifest push "${IMAGE}:${VERSION}"
 
-          if [ "${IS_BETA}" != "true" ]; then
-            docker manifest create "${IMAGE}:latest" \
-              "${IMAGE}:${VERSION}-amd64" \
-              "${IMAGE}:${VERSION}-arm64"
-            docker manifest push "${IMAGE}:latest"
-          else
-            docker manifest create "${IMAGE}:beta" \
-              "${IMAGE}:${VERSION}-amd64" \
-              "${IMAGE}:${VERSION}-arm64"
-            docker manifest push "${IMAGE}:beta"
-          fi
+          # deploy 是生产 compose（.env 的 KIRO_RS_IMAGE）实际引用的 tag。
+          # latest 一并推，便于手动拉取和排查。
+          for ALIAS in deploy latest; do
+            docker manifest create "${IMAGE}:${ALIAS}" \
+              "${IMAGE}:${VERSION}-amd64"
+            docker manifest push "${IMAGE}:${ALIAS}"
+          done
