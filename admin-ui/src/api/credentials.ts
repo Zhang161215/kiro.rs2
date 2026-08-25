@@ -467,6 +467,27 @@ export async function setAccountRpmLimitConfig(
   return data
 }
 
+// 中转层 prompt cache 配置。cacheReadEfficiency 为缓存读取效率系数（0~1），
+// defaultCacheReadEfficiency 是后端默认值，供「恢复默认」使用。
+export interface CacheConfig {
+  cacheReadEfficiency: number
+  defaultCacheReadEfficiency: number
+}
+
+// 获取缓存配置
+export async function getCacheConfig(): Promise<CacheConfig> {
+  const { data } = await api.get<CacheConfig>('/config/cache')
+  return data
+}
+
+// 更新缓存读取效率系数
+export async function setCacheConfig(patch: {
+  cacheReadEfficiency: number
+}): Promise<CacheConfig> {
+  const { data } = await api.put<CacheConfig>('/config/cache', patch)
+  return data
+}
+
 // 自愈治理配置。suspendedDetectionEnabled/enabled/minIntervalSecs/maxConsecutiveRounds
 // 可写；consecutiveRounds 为凭据最大连续轮数，totalCount 为累计恢复凭据次数。
 export interface SelfHealConfig {

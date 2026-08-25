@@ -20,6 +20,8 @@ import {
   setAccountThrottleConfig,
   getAccountRpmLimitConfig,
   setAccountRpmLimitConfig,
+  getCacheConfig,
+  setCacheConfig,
   getSelfHealConfig,
   setSelfHealConfig,
   getLogGovernanceConfig,
@@ -255,6 +257,25 @@ export function useSetAccountRpmLimitConfig() {
     mutationFn: setAccountRpmLimitConfig,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accountRpmLimitConfig'] })
+    },
+  })
+}
+
+// 获取中转层缓存配置（缓存读取效率系数）
+export function useCacheConfig() {
+  return useQuery({
+    queryKey: ['cacheConfig'],
+    queryFn: getCacheConfig,
+  })
+}
+
+// 更新缓存读取效率系数
+export function useSetCacheConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: setCacheConfig,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['cacheConfig'] })
     },
   })
 }

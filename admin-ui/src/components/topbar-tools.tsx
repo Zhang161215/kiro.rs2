@@ -1,14 +1,15 @@
 import { forwardRef, useEffect, useState, type ComponentPropsWithoutRef } from 'react'
 import {
-  Activity, RefreshCw, UploadCloud, Settings, Key, Wand2, Eye, EyeOff, Copy,
+  Activity, RefreshCw, Settings, Key, Wand2, Eye, EyeOff, Copy,
   MoreHorizontal, ShieldAlert, ShieldCheck, Boxes, HeartPulse, HeartCrack,
-  Gauge,
+  Gauge, Database,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
@@ -22,11 +23,10 @@ import {
   useAccountThrottleConfig, useSetAccountThrottleConfig,
   useAccountRpmLimitConfig, useSetAccountRpmLimitConfig,
   useSelfHealConfig, useSetSelfHealConfig,
+  useCacheConfig, useSetCacheConfig,
 } from '@/hooks/use-credentials'
-import { useUpdateCheck } from '@/hooks/use-update-check'
 import { updateAdminKey, type SelfHealConfigPatch } from '@/api/credentials'
 import { extractErrorMessage, generateApiKey } from '@/lib/utils'
-import { ImageUpdateDialog } from '@/components/image-update-dialog'
 import { AvailableModelsDialog } from '@/components/available-models-dialog'
 
 /**
@@ -45,9 +45,7 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
   const { data: throttleConfig, isLoading: isLoadingThrottle } = useAccountThrottleConfig()
   const { mutate: setThrottleConfig, isPending: isSettingThrottle } = useSetAccountThrottleConfig()
-  const { data: updateCheck } = useUpdateCheck()
 
-  const [imageUpdateOpen, setImageUpdateOpen] = useState(false)
   const [modelsDialogOpen, setModelsDialogOpen] = useState(false)
   const [keyDialogOpen, setKeyDialogOpen] = useState(false)
   const [newKey, setNewKey] = useState('')
@@ -117,11 +115,9 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
     isSettingMode,
     isSettingThrottle,
     loadBalancingMode: loadBalancingData?.mode,
-    openImageUpdate: () => setImageUpdateOpen(true),
     openModels: () => setModelsDialogOpen(true),
     openKeyDialog,
     throttleConfig,
-    updateCheck,
     updateCooldown: (secs: number) =>
       setThrottleConfig({ cooldownSecs: secs }, {
         onSuccess: () =>
@@ -133,7 +129,6 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
   return (
     <>
       {compact ? <CompactTools controls={controls} /> : <FullTools controls={controls} />}
-      <ImageUpdateDialog open={imageUpdateOpen} onOpenChange={setImageUpdateOpen} />
       <AvailableModelsDialog
         open={modelsDialogOpen}
         onOpenChange={setModelsDialogOpen}
@@ -242,11 +237,9 @@ interface ToolControls {
   isSettingMode: boolean
   isSettingThrottle: boolean
   loadBalancingMode?: 'priority' | 'balanced'
-  openImageUpdate: () => void
   openKeyDialog: () => void
   openModels: () => void
   throttleConfig?: { failover: boolean; cooldownSecs: number }
-  updateCheck?: { hasUpdate: boolean; latestVersion: string; currentVersion: string }
   updateCooldown: (secs: number) => void
 }
 
@@ -263,10 +256,189 @@ function FullTools({ controls }: { controls: ToolControls }) {
       />
       <SelfHealConfigButton />
       <AccountRpmLimitButton />
+      <CacheConfigButton />
       <ModelsButton onOpen={controls.openModels} />
       <RefreshButton onRefresh={controls.handleRefresh} />
-      <ImageUpdateButton controls={controls} />
       <KeySettingsMenu onOpenKeyDialog={controls.openKeyDialog} />
+    </>
+  )
+}
+
+const CACHE_EFFICIENCY_PRESETS = [100, 95, 90, 85, 80, 70]
+const MIN_CACHE_EFFICIENCY = 0
+const MAX_CACHE_EFFICIENCY = 100
+
+interface CacheConfigPanelState {
+  busy: boolean
+  draft: number
+  dirty: boolean
+  isLoading: boolean
+  percent: number | null
+  save: (percent: number, msg: string) => void
+  setDraft: (v: number) => void
+}
+
+function useCacheConfigPanelState(resetDraft: boolean): CacheConfigPanelState {
+  const { data: config, isLoading } = useCacheConfig()
+  const { mutate, isPending } = useSetCacheConfig()
+  const [draft, setDraftRaw] = useState<number | null>(null)
+
+  const percent =
+    config === undefined ? null : Math.round(config.cacheReadEfficiency * 1000) / 10
+
+  // 面板关闭时丢弃未应用的拖动结果，下次打开从服务端当前值起步。
+  useEffect(() => {
+    if (resetDraft) setDraftRaw(null)
+  }, [resetDraft])
+
+  const busy = isLoading || isPending
+  const effective = draft ?? percent ?? MAX_CACHE_EFFICIENCY
+  const dirty = percent !== null && draft !== null && draft !== percent
+
+  const save = (value: number, msg: string) => {
+    const clamped = Math.min(
+      Math.max(Math.round(value), MIN_CACHE_EFFICIENCY),
+      MAX_CACHE_EFFICIENCY,
+    )
+    mutate(
+      { cacheReadEfficiency: clamped / 100 },
+      {
+        onSuccess: () => {
+          toast.success(msg)
+          setDraftRaw(null)
+        },
+        onError: (err) => toast.error(`保存失败: ${extractErrorMessage(err)}`),
+      },
+    )
+  }
+
+  return {
+    busy,
+    draft: effective,
+    dirty,
+    isLoading,
+    percent,
+    save,
+    setDraft: setDraftRaw,
+  }
+}
+
+function CacheConfigButton() {
+  const [open, setOpen] = useState(false)
+  const panel = useCacheConfigPanelState(!open)
+  const discounted = panel.percent !== null && panel.percent < 100
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={panel.busy}
+          title={
+            panel.percent === null
+              ? '缓存读取效率系数'
+              : `缓存读取效率系数：${panel.percent}%${discounted ? '（已调低）' : '（默认）'}`
+          }
+        >
+          <Database
+            className={
+              discounted ? 'h-3.5 w-3.5 text-amber-600' : 'h-3.5 w-3.5 text-muted-foreground'
+            }
+          />
+          <span className="hidden md:inline">
+            {panel.isLoading ? '缓存…' : '缓存'}
+          </span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72">
+        <CacheConfigPanel {...panel} />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function CacheConfigPanel({
+  busy,
+  draft,
+  dirty,
+  percent,
+  save,
+  setDraft,
+}: CacheConfigPanelState) {
+  return (
+    <>
+      <DropdownMenuLabel>缓存读取效率系数</DropdownMenuLabel>
+      <div className="px-2 pb-2">
+        <div className="rounded-md bg-secondary/40 px-2.5 py-2 text-xs">
+          <div className="flex items-baseline justify-between">
+            <span className="font-medium">当前生效</span>
+            <span className="tabular-nums text-base font-semibold">
+              {percent === null ? '读取中…' : `${percent}%`}
+            </span>
+          </div>
+          <div className="mt-1 leading-snug text-muted-foreground">
+            调低会把部分 token 从「缓存读取」转入「缓存创建」，prompt
+            总量不变。仅影响账面口径，不改变上游真实 credits 消耗。
+          </div>
+        </div>
+      </div>
+
+      <DropdownMenuLabel className="pt-1">快捷设置</DropdownMenuLabel>
+      <div className="px-2 pb-2">
+        <div className="grid grid-cols-3 gap-1.5">
+          {CACHE_EFFICIENCY_PRESETS.map((n) => (
+            <Button
+              key={n}
+              size="sm"
+              variant={percent === n ? 'default' : 'outline'}
+              className="h-7 text-xs tabular-nums"
+              disabled={busy}
+              onClick={() => save(n, `缓存读取效率系数已设为 ${n}%`)}
+            >
+              {n}%
+            </Button>
+          ))}
+        </div>
+
+        <div className="flex items-baseline justify-between pt-2">
+          <DropdownMenuLabel className="px-0">自定义</DropdownMenuLabel>
+          <span className="text-sm font-semibold tabular-nums">
+            {draft}%
+            {dirty && <span className="ml-1 text-[11px] font-normal text-amber-600">未应用</span>}
+          </span>
+        </div>
+        <Slider
+          value={draft}
+          onValueChange={setDraft}
+          min={MIN_CACHE_EFFICIENCY}
+          max={MAX_CACHE_EFFICIENCY}
+          step={1}
+          disabled={busy}
+          aria-label="缓存读取效率系数"
+        />
+        <div className="mt-1.5 flex items-center gap-2">
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {MIN_CACHE_EFFICIENCY}%
+          </span>
+          <div className="h-px flex-1 bg-border/60" />
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {MAX_CACHE_EFFICIENCY}%
+          </span>
+          <Button
+            size="sm"
+            className="h-7 text-xs"
+            disabled={busy || !dirty}
+            onClick={() => save(draft, `缓存读取效率系数已设为 ${draft}%`)}
+          >
+            应用
+          </Button>
+        </div>
+        <div className="mt-2 leading-snug text-[11px] text-muted-foreground">
+          改动对下一个请求立即生效。概览页的累计数字混有旧系数的记录，切「按小时」
+          可更快看到纯新系数的结果。
+        </div>
+      </div>
     </>
   )
 }
@@ -309,12 +481,10 @@ function CompactTools({ controls }: { controls: ToolControls }) {
         <DropdownMenuItem onSelect={controls.openModels}>
           <Boxes />可用模型
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={controls.openImageUpdate}>
-          <UploadCloud />镜像在线更新
-        </DropdownMenuItem>
         <ThrottleCompactItems {...throttleProps} />
         <SelfHealCompactItems />
         <AccountRpmLimitCompactItems />
+        <CacheConfigCompactItems />
         <DropdownMenuLabel>密钥管理</DropdownMenuLabel>
         <DropdownMenuItem onSelect={controls.openKeyDialog}>
           <Key />修改登录API密钥（管理面板登录）
@@ -361,20 +531,6 @@ function RefreshButton({ onRefresh }: { onRefresh: () => void }) {
   )
 }
 
-function ImageUpdateButton({ controls }: { controls: ToolControls }) {
-  return (
-    <Button
-      variant="ghost"
-      size="icon"
-      onClick={controls.openImageUpdate}
-      title={imageUpdateTitle(controls.updateCheck)}
-      className="relative"
-    >
-      <UploadCloud className="h-4 w-4" />
-      {controls.updateCheck?.hasUpdate && <UpdateDot />}
-    </Button>
-  )
-}
 
 function KeySettingsMenu({ onOpenKeyDialog }: { onOpenKeyDialog: () => void }) {
   return (
@@ -391,20 +547,6 @@ function KeySettingsMenu({ onOpenKeyDialog }: { onOpenKeyDialog: () => void }) {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-function imageUpdateTitle(updateCheck: ToolControls['updateCheck']) {
-  if (!updateCheck?.hasUpdate) return '镜像在线更新'
-  return `发现新版本 v${updateCheck.latestVersion}（当前 v${updateCheck.currentVersion}）`
-}
-
-function UpdateDot() {
-  return (
-    <span className="absolute right-1 top-1 inline-flex h-2 w-2 items-center justify-center">
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
-      <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
-    </span>
   )
 }
 
@@ -1025,6 +1167,11 @@ function AccountRpmLimitPanel({
 function AccountRpmLimitCompactItems() {
   const panel = useAccountRpmLimitPanelState(false)
   return <AccountRpmLimitPanel {...panel} />
+}
+
+function CacheConfigCompactItems() {
+  const panel = useCacheConfigPanelState(false)
+  return <CacheConfigPanel {...panel} />
 }
 
 function CooldownPresetButtons({
