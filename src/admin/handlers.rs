@@ -732,20 +732,31 @@ pub async fn set_update_config(
 
 /// POST /api/admin/system/update/pull
 /// 下载新版二进制并校验（不替换当前进程）
-pub async fn pull_update_image(State(state): State<AdminState>) -> impl IntoResponse {
-    match state.service.pull_update_image().await {
-        Ok(response) => Json(response).into_response(),
-        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
-    }
+pub async fn pull_update_image(State(_state): State<AdminState>) -> impl IntoResponse {
+    binary_update_disabled_response()
+}
+
+/// 本 fork 停用二进制自更新的统一响应。
+///
+/// 原因：`binary_update` 的 `GITHUB_REPO` 硬编码指向上游 `ZyphrZero/kiro.rs`，
+/// 执行后会用上游二进制覆盖掉本仓库的自定义功能（缓存效率系数等）。本仓库通过
+/// 容器镜像（ghcr.io）升级。service 层另有一道拦截，用于挡住无人值守的
+/// `start_auto_update_scheduler` 后台任务——那条路径不经过 handler。
+fn binary_update_disabled_response() -> axum::response::Response {
+    use axum::http::StatusCode;
+    (
+        StatusCode::BAD_REQUEST,
+        Json(super::types::AdminErrorResponse::invalid_request(
+            "本部署已停用二进制自更新，请通过容器镜像更新（docker compose pull && docker compose up -d）",
+        )),
+    )
+        .into_response()
 }
 
 /// POST /api/admin/system/update/apply
 /// 下载新版二进制、替换 exe，进程退出由容器重启策略接管
-pub async fn apply_image_update(State(state): State<AdminState>) -> impl IntoResponse {
-    match state.service.apply_image_update().await {
-        Ok(response) => Json(response).into_response(),
-        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
-    }
+pub async fn apply_image_update(State(_state): State<AdminState>) -> impl IntoResponse {
+    binary_update_disabled_response()
 }
 
 /// POST /api/admin/system/update/rollback
