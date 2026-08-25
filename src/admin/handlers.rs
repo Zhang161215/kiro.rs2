@@ -25,6 +25,7 @@ use super::{
         CreateClientKeyResponse, GlobalProxyResponse, ModelTestRequest,
         SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest, SetDisabledRequest,
         SetGlobalProxyRequest,
+        SetCacheConfigRequest,
         SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetPriorityRequest,
         SetSelfHealConfigRequest,
         SetUpdateConfigRequest, StartIdcLoginRequest, StartSocialLoginRequest, SuccessResponse,
@@ -599,6 +600,32 @@ pub async fn set_self_heal_config(
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// GET /api/admin/config/cache
+/// 获取中转层 prompt cache 配置（缓存读取效率系数）
+pub async fn get_cache_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_cache_config())
+}
+
+/// PUT /api/admin/config/cache
+/// 更新缓存读取效率系数（运行时立即生效 + 持久化 config.json）
+pub async fn set_cache_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetCacheConfigRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    let requested = payload.cache_read_efficiency;
+    if !requested.is_finite() || !(0.0..=1.0).contains(&requested) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(super::types::AdminErrorResponse::invalid_request(
+                "缓存读取效率系数必须是 0.0 ~ 1.0 之间的数值",
+            )),
+        )
+            .into_response();
+    }
+    Json(state.service.set_cache_config(payload)).into_response()
 }
 
 /// GET /api/admin/config/log-governance

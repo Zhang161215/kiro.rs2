@@ -261,6 +261,23 @@ async fn main() {
         cache_dir.join("cache_metering.json"),
     )));
     cache_meter.clone().spawn_background();
+    // 缓存读取效率系数：从配置载入运行时（Admin 面板可热改，无需重启）。
+    anthropic::cache_metering::set_cache_read_efficiency(config.cache_read_efficiency);
+    // 迁移提示：本仓库之前的私有构建把该系数存在独立文件 cache_metering_config.json，
+    // 现已并入 config.json 的 cacheReadEfficiency。旧文件不再被读取，若残留则告警，
+    // 避免"系数被静默重置为 1.0"影响计费口径而无人察觉。
+    {
+        let legacy = cache_dir.join("cache_metering_config.json");
+        if legacy.exists() {
+            tracing::warn!(
+                "检测到遗留文件 {}，本版本已不再读取它。当前生效系数取自 config.json 的 \
+                 cacheReadEfficiency = {}。如需沿用旧值，请在面板「缓存」里重新设置，\
+                 确认后可删除该遗留文件。",
+                legacy.display(),
+                config.cache_read_efficiency
+            );
+        }
+    }
 
     let anthropic_app = anthropic::create_router_with_shared_provider(
         Some(kiro_provider.clone()),

@@ -17,7 +17,6 @@ import {
   Key,
   Building2,
   Settings,
-  UploadCloud,
   MoreHorizontal,
   Activity,
   ChevronLeft,
@@ -88,7 +87,6 @@ import {
 } from "@/components/batch-verify-dialog";
 import { detectTier, type Tier } from "@/components/subscription-badge";
 import { ProxyPoolDialog } from "@/components/proxy-pool-dialog";
-import { ImageUpdateDialog } from "@/components/image-update-dialog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   useCredentials,
@@ -99,7 +97,6 @@ import {
   useResetAllSuccessCount,
   useSetPriority,
 } from "@/hooks/use-credentials";
-import { useUpdateCheck } from "@/hooks/use-update-check";
 import { useFailureStats } from "@/hooks/use-traces";
 import { useGroupOptions } from "@/hooks/use-groups";
 import { useRectSelect } from "@/hooks/use-rect-select";
@@ -253,7 +250,6 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
   const [socialLoginDialogOpen, setSocialLoginDialogOpen] = useState(false);
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false);
   const [proxyPoolDialogOpen, setProxyPoolDialogOpen] = useState(false);
-  const [imageUpdateDialogOpen, setImageUpdateDialogOpen] = useState(false);
   const [adminKeyDialogOpen, setAdminKeyDialogOpen] = useState(false);
   const [newAdminKey, setNewAdminKey] = useState("");
   const [updatingAdminKey, setUpdatingAdminKey] = useState(false);
@@ -325,7 +321,6 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
     useSetLoadBalancingMode();
   const resetAllSuccess = useResetAllSuccessCount();
   const setPriority = useSetPriority();
-  const { data: updateCheck } = useUpdateCheck();
   const { data: failureStatsMap } = useFailureStats();
   const groupOptions = useGroupOptions();
 
@@ -1335,25 +1330,6 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
               >
                 <RefreshCw className="h-4 w-4" />
               </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setImageUpdateDialogOpen(true)}
-                title={
-                  updateCheck?.hasUpdate
-                    ? `发现新版本 v${updateCheck.latestVersion}（当前 v${updateCheck.currentVersion}）`
-                    : "镜像在线更新"
-                }
-                className="relative"
-              >
-                <UploadCloud className="h-4 w-4" />
-                {updateCheck?.hasUpdate && (
-                  <span className="absolute right-1 top-1 inline-flex h-2 w-2 items-center justify-center">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
-                  </span>
-                )}
-              </Button>
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" title="设置">
@@ -2201,11 +2177,6 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
         open={proxyPoolDialogOpen}
         onOpenChange={setProxyPoolDialogOpen}
       />
-      <ImageUpdateDialog
-        open={imageUpdateDialogOpen}
-        onOpenChange={setImageUpdateDialogOpen}
-      />
-
       {/* 修改登录API密钥对话框（adminApiKey —— 管理面板登录密钥） */}
       <Dialog
         open={adminKeyDialogOpen}

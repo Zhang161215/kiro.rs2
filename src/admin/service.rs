@@ -33,7 +33,7 @@ use super::error::AdminServiceError;
 use super::proxy_pool::{GetUrlResult, ProxyPoolManager};
 use super::types::{
     AccountRpmLimitConfigResponse, AccountThrottleConfigResponse, AddCredentialRequest,
-    AddCredentialResponse, AssignProxyRequest,
+    AddCredentialResponse, AssignProxyRequest, CacheConfigResponse, SetCacheConfigRequest,
     AssignRoundRobinResponse, AvailableModelItem, AvailableModelsResponse, BalanceResponse,
     BatchAddProxyRequest, BatchImportEvent, CheckRateLimitRequest, CredentialStatusItem,
     CredentialsExportResponse, CredentialsStatusResponse, EnableOverageAllResult, ExportedAccount,
@@ -1489,6 +1489,30 @@ impl AdminService {
         self.update_config_file(move |c| c.api_key = Some(key));
     }
 
+    /// 读取当前生效的缓存读取效率系数。
+    pub fn get_cache_config(&self) -> CacheConfigResponse {
+        CacheConfigResponse {
+            cache_read_efficiency: crate::anthropic::cache_metering::cache_read_efficiency(),
+            default_cache_read_efficiency:
+                crate::anthropic::cache_metering::DEFAULT_CACHE_READ_EFFICIENCY,
+        }
+    }
+
+    /// 更新缓存读取效率系数：先改运行时（立即生效），再写回 `config.json`（重启保留）。
+    ///
+    /// 入参合法性由 handler 层负责（返回 400），这里再夹一次防御越界。
+    pub fn set_cache_config(&self, req: SetCacheConfigRequest) -> CacheConfigResponse {
+        let applied =
+            crate::anthropic::cache_metering::set_cache_read_efficiency(req.cache_read_efficiency);
+        self.update_config_file(move |c| c.cache_read_efficiency = applied);
+
+        CacheConfigResponse {
+            cache_read_efficiency: applied,
+            default_cache_read_efficiency:
+                crate::anthropic::cache_metering::DEFAULT_CACHE_READ_EFFICIENCY,
+        }
+    }
+
     /// 获取在线更新配置（GitHub Token 只返回是否已配置）
     pub fn get_update_config(&self) -> UpdateConfigResponse {
         self.update_config.lock().response()
@@ -1546,7 +1570,15 @@ impl AdminService {
     /// 下载新版二进制并通过校验和验证（对应前端「拉取镜像」按钮）。
     /// 不替换当前可执行文件，便于用户在正式应用前先确认下载成功。
     /// 下载产物保存到 `<exe>.staged-<version>`，下次 apply 命中同版本时复用。
+    /// handler 已直接返回「已停用」，此方法不再被调用；保留作为第二道防线，
+    /// 以防将来有人重新接回调用点。
+    #[allow(dead_code)]
     pub async fn pull_update_image(&self) -> Result<ImageUpdateResponse, AdminServiceError> {
+        // 见 apply_image_update 的说明：本 fork 停用二进制自更新。
+        return Err(AdminServiceError::InvalidCredential(
+            "本部署已停用二进制自更新，请通过容器镜像更新（docker compose pull && up -d）".to_string(),
+        ));
+        #[allow(unreachable_code)]
         let (proxy, token) = {
             let runtime = self.update_config.lock();
             (
@@ -1595,6 +1627,14 @@ impl AdminService {
     /// `restart: unless-stopped` 接管重启（对应前端「更新并重启」按钮）。
     /// 若 pull 已经把目标版本下载到 `<exe>.staged-<version>`，跳过重复下载。
     pub async fn apply_image_update(&self) -> Result<ImageUpdateResponse, AdminServiceError> {
+        // 本 fork 停用二进制自更新：binary_update 的 GITHUB_REPO 硬编码指向上游
+        // ZyphrZero/kiro.rs，一旦执行会用上游二进制覆盖掉本仓库的自定义功能
+        // （缓存效率系数等）。本仓库通过容器镜像更新（ghcr.io）升级，两套机制
+        // 并存只会互相打架。面板入口已移除，这里再拦一道防止直接调接口。
+        return Err(AdminServiceError::InvalidCredential(
+            "本部署已停用二进制自更新，请通过容器镜像更新（docker compose pull && up -d）".to_string(),
+        ));
+        #[allow(unreachable_code)]
         let (proxy, token) = {
             let runtime = self.update_config.lock();
             (

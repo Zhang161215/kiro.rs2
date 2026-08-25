@@ -820,6 +820,26 @@ pub struct UpdateAdminKeyRequest {
     pub new_key: String,
 }
 
+// ============ 缓存读取效率系数 ============
+
+/// 缓存配置响应（GET /admin/config/cache）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheConfigResponse {
+    /// 当前生效的缓存读取效率系数（0.0 ~ 1.0）
+    pub cache_read_efficiency: f64,
+    /// 默认值，供前端「恢复默认」使用
+    pub default_cache_read_efficiency: f64,
+}
+
+/// 修改缓存读取效率系数请求（PUT /admin/config/cache）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCacheConfigRequest {
+    /// 新的效率系数，接受 0.0 ~ 1.0，越界会被拒绝
+    pub cache_read_efficiency: f64,
+}
+
 // ============ 客户端 API Key 分发 ============
 
 /// 客户端 Key 列表项（脱敏展示）

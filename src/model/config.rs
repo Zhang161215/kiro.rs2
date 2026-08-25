@@ -228,6 +228,16 @@ pub struct Config {
     #[serde(default = "default_model_cache_ttl_secs")]
     pub model_cache_ttl_secs: u64,
 
+    /// 中转层 prompt cache 的「缓存读取效率系数」（0.0 ~ 1.0，默认 1.0）。
+    ///
+    /// 本地模拟的缓存命中偏乐观（前缀逐字节相同即视为完全可复用），真实 KV cache
+    /// 并非 100% 可复用。调低该值让上报的 `cache_read_input_tokens` 更保守，折掉的
+    /// 部分转入 `cache_creation_input_tokens`，prompt 总量不变。
+    ///
+    /// 仅影响**上报口径**，不改变上游真实 credits 消耗。
+    #[serde(default = "default_cache_read_efficiency")]
+    pub cache_read_efficiency: f64,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -351,6 +361,10 @@ fn default_model_cache_ttl_secs() -> u64 {
     60 * 60
 }
 
+fn default_cache_read_efficiency() -> f64 {
+    crate::anthropic::cache_metering::DEFAULT_CACHE_READ_EFFICIENCY
+}
+
 fn default_update_auto_apply_time() -> String {
     "03:00".to_string()
 }
@@ -415,6 +429,7 @@ impl Default for Config {
             self_heal_min_interval_secs: default_self_heal_min_interval_secs(),
             self_heal_max_consecutive_rounds: default_self_heal_max_consecutive_rounds(),
             model_cache_ttl_secs: default_model_cache_ttl_secs(),
+            cache_read_efficiency: default_cache_read_efficiency(),
             extract_thinking: default_extract_thinking(),
             tool_compatibility_mode: default_tool_compatibility_mode(),
             default_endpoint: default_endpoint(),
@@ -504,6 +519,20 @@ mod tests {
     fn model_cache_ttl_accepts_explicit_value() {
         let config: Config = serde_json::from_str(r#"{"modelCacheTtlSecs":120}"#).unwrap();
         assert_eq!(config.model_cache_ttl_secs, 120);
+    }
+
+    #[test]
+    fn cache_read_efficiency_defaults_for_existing_configs() {
+        // 老配置文件没有该字段 → 必须回落 1.0，行为与引入前一致
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.cache_read_efficiency, 1.0);
+        assert_eq!(Config::default().cache_read_efficiency, 1.0);
+    }
+
+    #[test]
+    fn cache_read_efficiency_accepts_explicit_value() {
+        let config: Config = serde_json::from_str(r#"{"cacheReadEfficiency":0.85}"#).unwrap();
+        assert_eq!(config.cache_read_efficiency, 0.85);
     }
 
     #[test]

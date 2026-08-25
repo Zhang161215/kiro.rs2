@@ -22,7 +22,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// 默认条目上限（防止内存无限增长）
 const DEFAULT_CAPACITY: usize = 4096;
@@ -30,6 +30,40 @@ const DEFAULT_CAPACITY: usize = 4096;
 const MAX_TTL_SECS: i64 = 3600;
 /// 默认 TTL（5min，ephemeral 默认值）
 const DEFAULT_TTL_SECS: i64 = 5 * 60;
+
+/// 缓存读取效率系数的默认值：1.0 = 不打折，与未引入该系数前的行为完全一致。
+pub const DEFAULT_CACHE_READ_EFFICIENCY: f64 = 1.0;
+
+/// 缓存读取效率系数（运行时可调，Admin 面板下发）。
+///
+/// 语义：把「按前缀匹配算出的 cache_read」乘以该系数后上报。折掉的部分不会消失，
+/// 因为 `creation` 按余量计算，差额自动流入 `cache_creation`——
+/// `input + creation + read == total` 的互斥不变量始终成立。
+///
+/// 用途：本地模拟的缓存命中偏乐观（前缀逐字节相同即视为完全可复用），真实
+/// KV cache 并非 100% 可复用。调低该系数使账面缓存读取更保守。
+/// 注意这只影响**上报口径**，不改变上游真实 credits 消耗。
+static CACHE_READ_EFFICIENCY: OnceLock<Mutex<f64>> = OnceLock::new();
+
+fn efficiency_cell() -> &'static Mutex<f64> {
+    CACHE_READ_EFFICIENCY.get_or_init(|| Mutex::new(DEFAULT_CACHE_READ_EFFICIENCY))
+}
+
+/// 设置缓存读取效率系数，入参被夹到 `[0.0, 1.0]`；非有限值（NaN/inf）按默认值处理。
+pub fn set_cache_read_efficiency(value: f64) -> f64 {
+    let sanitized = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_CACHE_READ_EFFICIENCY
+    };
+    *efficiency_cell().lock() = sanitized;
+    sanitized
+}
+
+/// 读取当前生效的缓存读取效率系数。
+pub fn cache_read_efficiency() -> f64 {
+    *efficiency_cell().lock()
+}
 
 /// 单个缓存条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +116,18 @@ impl CacheUsage {
     ///
     /// 无缓存覆盖（`cache_covered_est == 0`）或基准缺失时，直接返回
     /// `(total_real, 0, 0)`——全部计入 input，不凭空造缓存计数。
+    ///
+    /// 分摊后会套用运行时的缓存读取效率系数（见 [`cache_read_efficiency`]）。
     pub fn split_against_total(&self, total_real: i32) -> (i32, i32, i32) {
+        self.split_against_total_with_efficiency(total_real, cache_read_efficiency())
+    }
+
+    /// [`Self::split_against_total`] 的显式系数版本：便于测试，避免依赖全局状态。
+    fn split_against_total_with_efficiency(
+        &self,
+        total_real: i32,
+        efficiency: f64,
+    ) -> (i32, i32, i32) {
         let total = total_real.max(0);
         if self.cache_covered_est <= 0 || self.prompt_total_est <= 0 {
             return (total, 0, 0);
@@ -99,6 +144,13 @@ impl CacheUsage {
             0
         };
         let read = read.clamp(0, cache_total);
+        // 应用效率系数：模拟真实 KV cache 并非 100% 可复用。折掉的部分不会凭空消失，
+        // 下面 creation 按余量计算，差额自动流入 cache_creation，互斥不变量仍成立。
+        let read = if efficiency < 1.0 {
+            (((read as f64) * efficiency).round() as i32).clamp(0, cache_total)
+        } else {
+            read
+        };
         let creation = cache_total - read;
         let input = total - cache_total;
         (input, creation, read)
@@ -1479,5 +1531,107 @@ mod tests {
         let mut buf = Vec::new();
         img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png).unwrap();
         B64.encode(&buf)
+    }
+
+    // ============ 缓存读取效率系数 ============
+
+    /// 构造一个 covered=80%、其中 read:creation = 30:50 的样本。
+    /// 真实 total=1000 时：cache_total=800，未打折 read=300 / creation=500 / input=200。
+    fn efficiency_fixture() -> CacheUsage {
+        CacheUsage {
+            cache_read: 30,
+            cache_covered_est: 80,
+            prompt_total_est: 100,
+        }
+    }
+
+    #[test]
+    fn efficiency_discount_moves_read_into_creation() {
+        let u = efficiency_fixture();
+        let (input, creation, read) = u.split_against_total_with_efficiency(1000, 0.85);
+        // read 打折：300 * 0.85 = 255
+        assert_eq!(read, 255);
+        // 折掉的 45 流入 creation：500 + 45 = 545
+        assert_eq!(creation, 545);
+        // input 不受系数影响——系数只在「缓存覆盖部分」内部重新分配
+        assert_eq!(input, 200, "系数不应改变未缓存尾部");
+        assert_eq!(input + creation + read, 1000, "互斥不变量必须成立");
+    }
+
+    #[test]
+    fn efficiency_one_is_identical_to_undiscounted() {
+        let u = efficiency_fixture();
+        assert_eq!(
+            u.split_against_total_with_efficiency(1000, 1.0),
+            (200, 500, 300),
+            "1.0 必须与未引入系数前的行为逐值一致"
+        );
+    }
+
+    #[test]
+    fn efficiency_zero_drops_all_read_to_creation() {
+        let u = efficiency_fixture();
+        let (input, creation, read) = u.split_against_total_with_efficiency(1000, 0.0);
+        assert_eq!(read, 0, "0 等于关掉缓存读取");
+        assert_eq!(creation, 800, "整个缓存覆盖部分都算 creation");
+        assert_eq!(input, 200);
+        assert_eq!(input + creation + read, 1000);
+    }
+
+    #[test]
+    fn efficiency_invariant_holds_across_sweep() {
+        let u = efficiency_fixture();
+        let mut prev_read = i32::MAX;
+        for step in 0..=100 {
+            let eff = step as f64 / 100.0;
+            let (input, creation, read) = u.split_against_total_with_efficiency(1000, eff);
+            assert_eq!(input + creation + read, 1000, "eff={eff} 破坏了互斥不变量");
+            assert!(
+                read >= 0 && creation >= 0 && input >= 0,
+                "eff={eff} 出现负值"
+            );
+            assert!(read <= 300, "eff={eff} read 超过未打折上限");
+            prev_read = prev_read.min(read);
+        }
+        assert_eq!(prev_read, 0, "eff=0 时 read 应触到 0");
+    }
+
+    #[test]
+    fn efficiency_no_cache_stays_all_input_regardless_of_factor() {
+        let u = CacheUsage {
+            cache_read: 0,
+            cache_covered_est: 0,
+            prompt_total_est: 100,
+        };
+        // 无缓存覆盖时提前返回，系数不参与
+        assert_eq!(u.split_against_total_with_efficiency(500, 0.5), (500, 0, 0));
+    }
+
+    #[test]
+    fn set_efficiency_clamps_and_rejects_non_finite() {
+        // 该测试改动全局状态，末尾恢复默认值，避免影响其他测试。
+        assert_eq!(set_cache_read_efficiency(0.85), 0.85);
+        assert_eq!(cache_read_efficiency(), 0.85);
+
+        assert_eq!(set_cache_read_efficiency(1.7), 1.0, "上界夹到 1.0");
+        assert_eq!(set_cache_read_efficiency(-0.3), 0.0, "下界夹到 0.0");
+        assert_eq!(
+            set_cache_read_efficiency(f64::NAN),
+            DEFAULT_CACHE_READ_EFFICIENCY,
+            "NaN 回落默认值"
+        );
+        assert_eq!(
+            set_cache_read_efficiency(f64::INFINITY),
+            DEFAULT_CACHE_READ_EFFICIENCY,
+            "inf 回落默认值"
+        );
+
+        set_cache_read_efficiency(DEFAULT_CACHE_READ_EFFICIENCY);
+        assert_eq!(cache_read_efficiency(), 1.0);
+    }
+
+    #[test]
+    fn default_efficiency_is_one() {
+        assert_eq!(DEFAULT_CACHE_READ_EFFICIENCY, 1.0, "默认必须不改变既有行为");
     }
 }
